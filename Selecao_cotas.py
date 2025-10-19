@@ -43,6 +43,8 @@ from selenium.webdriver.common.keys import Keys
 import atexit
 import unicodedata
 
+
+
 # # Configuração de Opções (Mantida como estava no original para contexto, mas movida para o final)
 # options = Options()
 # options.add_argument('--disable-backgrounding-occluded-windows')  # Impede que abas em 2º plano sejam pausadas
@@ -95,7 +97,18 @@ def driver_ativo(drv):
         return True
     except:
         return False
-    
+
+def _find_user_file(name: str) -> Path:
+    candidates = [
+        _executable_dir() / name,   # ao lado do run_app
+        Path.cwd() / name,          # diretório atual
+        APP_DATA / name,            # ~/.selecao_cotas
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    raise FileNotFoundError(f"Arquivo '{name}' não encontrado. Coloque-o ao lado do executável ou em {APP_DATA}.")
+
 # utilitário: delays "humanos"
 def human_sleep(a=0.05, b=0.5):
     time.sleep(random.uniform(a, b))
@@ -242,6 +255,31 @@ def normalize_inscricao_municipal(x):
         d = d[-11:]         # mantém os 11 finais se vier maior
     return d
 
+def _normalize_tipo(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = _strip_accents(s)                     # remove acentos
+    s = re.sub(r'[^\w\s-]', '', s)            # remove pontuação estranha
+    return s.replace(' ', '_')                # troca espaço por _
+
+
+def _resolve_grupos_csv(tp_produto: str) -> Path | None:
+    base = _normalize_tipo(tp_produto)
+    fname = f"grupos_{base}.csv"
+    candidatos = [
+        APP_DATA / fname,                     # onde você salva na função guardar_grupos_disponiveis
+        _executable_dir() / fname,            # ao lado do executável (PyInstaller)
+        Path.cwd() / fname,                   # diretório atual
+    ]
+    # fallback legados (se já existirem com acento/sem normalizar)
+    legacy = [
+        APP_DATA / f"grupos_{tp_produto.replace(' ', '_')}.csv",
+        _executable_dir() / f"grupos_{tp_produto.replace(' ', '_')}.csv",
+        Path.cwd() / f"grupos_{tp_produto.replace(' ', '_')}.csv",
+    ]
+    for p in candidatos + legacy:
+        if p.exists():
+            return p
+    return None
 
 
 def _js(driver, script, *args):
@@ -372,45 +410,42 @@ def ensure_uf_dropdown_closed_and_selected(driver, timeout=6):
         except TimeoutException:
             return False
 
-
 def _executable_dir() -> Path:
-    """
-    Retorna a pasta do executável em todos os cenários:
-    - Dev: pasta do arquivo .py
-    - PyInstaller onefile/onedir: pasta do executável
-    - .app no macOS: .../MeuApp.app/Contents/MacOS
-    """
     if getattr(sys, 'frozen', False):
-        return Path(sys.executable).resolve().parent
+        return Path(sys.executable).resolve().parent  # .../SelecionaCotas.app/Contents/MacOS
     return Path(__file__).resolve().parent
 
 def find_data_file(name: str) -> Path:
-    """
-    Procura o arquivo em lugares razoáveis:
-    - CWD (onde o usuário executou)
-    - pasta do executável
-    - raiz do .app (subindo 3 níveis a partir de Contents/MacOS)
-    - pasta do .py (modo dev)
-    Levanta FileNotFoundError se não achar.
-    """
     exe_dir = _executable_dir()
+    # se estiver dentro de um .app, subir 3 níveis chega na raiz do app; e subir 4 pode chegar no dist/
+    app_root = exe_dir.parent.parent.parent if ".app" in str(exe_dir) else None
+    dist_root = app_root.parent if app_root else None
+
     candidates = [
-        Path.cwd(),
-        exe_dir,
-        exe_dir.parent.parent.parent if ".app" in str(exe_dir) else None,  # raiz do .app
-        Path(__file__).resolve().parent
+        Path.cwd(),            # onde o usuário executou (terminal)
+        exe_dir,               # ao lado do binário (Contents/MacOS)
+        app_root,              # raiz do .app
+        dist_root,             # pasta dist/ (um nível acima da raiz do .app)
+        Path.home() / ".selecao_cotas",  # pasta de dados do usuário
     ]
+
     for base in filter(None, candidates):
-        p = (base / name)
+        p = base / name
         if p.exists():
             return p
-    raise FileNotFoundError(f"Arquivo '{name}' não encontrado. Procurei em:\n" +
-                            "\n".join(str((c or Path()).resolve() / name) for c in candidates if c))
+
+    tried = "\n".join(str((c or Path()).resolve() / name) for c in candidates if c)
+    raise FileNotFoundError(
+        f"Arquivo '{name}' não encontrado. Procurei em:\n{tried}\n"
+        "Coloque-o ao lado do executável (.app/Contents/MacOS), na raiz do .app, "
+        "na pasta dist/ ou em ~/.selecao_cotas."
+    )
+
 
 # - Load DataFrame de clientes
 def load_df_clientes():
     global df_atual, df_clientes
-    arq = find_data_file('base_clientes.xlsx')  # <— em vez de Path('base_clientes.xlsx')
+    arq = _find_user_file('base_clientes.xlsx')  # <— em vez de Path('base_clientes.xlsx')
     try:
         import openpyxl  # garante engine disponível no runtime
     except ImportError as e:
@@ -428,42 +463,55 @@ def load_df_clientes():
 
 
 
+def _atomic_replace(src_tmp: Path, dst: Path):
+    # troca o arquivo de forma segura (evita corrupção se der crash no meio)
+    src_tmp.replace(dst)
 
-# Atualizar status do cliente no xlsx
 def atualizar_status_cliente(cpf_cliente, novo_status, caminho='base_clientes.xlsx'):
-    arq = Path(caminho)
-    if not arq.exists():
-        print(f"❌ Erro: Arquivo '{arq.name}' não encontrado.")
-        return
     try:
-        # tenta ler Excel
+        # usa a MESMA busca da leitura (pasta do exe, CWD, raiz do .app, pasta do .py)
+        arq = find_data_file(caminho)
+    except FileNotFoundError as e:
+        print(f"❌ Erro: {e}")
+        return
+
+    # tenta ler Excel; se faltar openpyxl, cai pro CSV irmão
+    is_excel = True
+    try:
         df = pd.read_excel(arq, dtype={'cpf_cnpj': str}, engine='openpyxl')
-        is_excel = True
     except Exception as e:
-        print("⚠️ openpyxl indisponível. Usando CSV como fallback.", e)
-        # fallback: sincronize com CSV irmão
-        csv_path = arq.with_suffix('.csv')
-        df = pd.read_csv(csv_path, sep=';', dtype={'cpf_cnpj': str})
+        print("⚠️ Falha ao ler Excel; tentando CSV irmão:", e)
         is_excel = False
+        arq_csv = arq.with_suffix('.csv')
+        if not arq_csv.exists():
+            print(f"❌ CSV irmão não encontrado: {arq_csv.name}")
+            return
+        df = pd.read_csv(arq_csv, sep=';', dtype={'cpf_cnpj': str})
 
     alvo = re.sub(r'\D', '', str(cpf_cliente))
     col = df['cpf_cnpj'].astype(str).str.replace(r'\D', '', regex=True)
 
-    if alvo in col.values:
-        df.loc[col == alvo, 'status'] = novo_status
-        try:
-            if is_excel:
-                df.to_excel(arq, index=False, engine='openpyxl')
-            else:
-                df.to_csv(arq.with_suffix('.csv'), sep=';', index=False)
-        except Exception as e:
-            print("❌ Falha ao salvar. Tentando CSV:", e)
-            df.to_csv(arq.with_suffix('.csv'), sep=';', index=False)
-        print(f"✅ Status de {cpf_cliente} atualizado para '{novo_status}'.")
-    else:
+    if alvo not in col.values:
         print(f"⚠️ CPF/CNPJ {cpf_cliente} não encontrado. Nada feito.")
+        return
 
+    df.loc[col == alvo, 'status'] = novo_status
 
+    try:
+        if is_excel:
+            # salva de forma atômica na MESMA pasta do arquivo localizado
+            tmp = arq.with_suffix('.tmp.xlsx')
+            df.to_excel(tmp, index=False, engine='openpyxl')
+            _atomic_replace(tmp, arq)
+        else:
+            tmp = arq.with_suffix('.tmp.csv')
+            df.to_csv(tmp, sep=';', index=False)
+            _atomic_replace(tmp, arq.with_suffix('.csv'))
+        print(f"✅ Status de {cpf_cliente} atualizado para '{novo_status}' em {arq.name}.")
+    except PermissionError as e:
+        print(f"❌ Permissão negada ao salvar (arquivo pode estar aberto no Excel): {e}")
+    except Exception as e:
+        print(f"❌ Falha ao salvar: {e}")
 
 
 
@@ -478,91 +526,204 @@ def iniciar_driver():
     global driver, wait, action, driver_started
 
     if driver_started and driver is not None and driver_ativo(driver):
-        print("Info", "O navegador já está iniciado.", parent=root)
+        print("Info: O navegador já está iniciado.")
         return
+
     options = uc.ChromeOptions()
 
-    # perfil existente e UA (mantive seu uso)
+    # MANTER o mesmo PROFILE_DIR (use sua constante PROFILE_DIR)
+    # isso preserva cookies, extensões e comportamento "real" entre execuções
     options.add_argument(f"--user-data-dir={PROFILE_DIR}")
     options.add_argument(f"--user-agent={USER_AGENT}")
 
-    # flags úteis
+    # Stealth / invisibilidade (mantidos do original)
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--lang=pt-BR")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-infobars")
-    # options.add_argument("--start-maximized")  # opcional
 
-    # caminho explícito do binário do Chrome no macOS
+    # Limites de processos e ajustes para reduzir consumo de RAM
+    options.add_argument("--renderer-process-limit=3")
+    options.add_argument("--process-per-site")
+    options.add_argument("--disable-site-isolation-trials")
+    options.add_argument("--disk-cache-size=1")  # reduz cache em disco
+
+    # Menos "ruído" em background (pouco impacto em stealth)
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-sync")
+
+    # Caminho explícito do Chrome (macOS)
     options.binary_location = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
-    print("Iniciando o Chrome com undetected-chromedriver (forçando version_main=141)...")
+    print("Iniciando o Chrome com undetected-chromedriver (version_main=141)...")
 
     try:
-        # força compatibilidade com sua versão do Chrome e usa subprocess no mac
+        # use_subprocess=False é preferível no macOS + onefile
         driver = uc.Chrome(
             options=options,
-            version_main=141,    # <--- força para Chrome 141
-            use_subprocess=True  # importante no macOS / Alterar para FALSE para TESTAR
+            version_main=141,       # força a major correta do Chrome (sua versão: 141.x)
+            use_subprocess=False,
+            headless=False
         )
         driver_started = True
-
         wait = WebDriverWait(driver, 15)
         action = ActionChains(driver)
-        print("Driver iniciado.")
 
-        # ajuste de tamanho (mais "real")
+        # janela realista
         try:
             driver.set_window_size(1199, 889)
         except Exception:
             pass
+
+        # pequeno delay humano
         human_sleep(0.1, 1.1)
 
-        # INJETAR stealth JS (mantive seu script)
+        # stealth JS injetado (mantém invisibilidade)
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": """
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                try {
+                  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                } catch(e) {}
                 window.chrome = window.chrome || { runtime: {} };
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-                Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR','pt','en-US','en'] });
+                try {
+                  Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+                } catch(e) {}
+                try {
+                  Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR','pt','en-US','en'] });
+                } catch(e) {}
             """
         })
-
-        print("Stealth JS injetado.")
-
-        # override UA via CDP
+        # override UA via CDP (faça em try/except)
         try:
             driver.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": USER_AGENT})
         except Exception:
             pass
 
-        # teste rápido
+        # Limpar cache/cookies iniciais para não inflar memória
+        try:
+            driver.execute_cdp_cmd("Network.enable", {})
+            driver.execute_cdp_cmd("Network.clearBrowserCache", {})
+            driver.execute_cdp_cmd("Network.clearBrowserCookies", {})
+        except Exception:
+            pass
+
+        # Teste rápido de navegação
         driver.get("https://www.google.com")
         print("Título inicial:", driver.title)
 
-        save_cookies(driver, COOKIES_FILE)
-        human_sleep(1.0, 2.0)
-        print("Fluxo finalizado sem exceções aparentes")
-        #messagebox.showinfo("Info", "Driver iniciado com sucesso!")
-
-        return driver
-
-    except Exception as e:
-        print("Erro ao criar/iniciar driver:")
-        traceback.print_exc()
-        # dica para debug: se quiser, expose logs:
+        # salvar cookies (se quiser)
         try:
-            # tenta fechar com segurança
-            driver.quit()
+            save_cookies(driver, COOKIES_FILE)
         except Exception:
             pass
-        raise  # relança para o fluxo chamar saber que houve falha
+
+        print("Fluxo finalizado sem exceções aparentes")
+        return driver
+
+    except Exception as exc:
+        # Log completo para debugging; NÃO force driver.quit() pois driver pode não existir
+        import traceback, sys
+        print("Erro ao criar/iniciar driver:")
+        traceback.print_exc(file=sys.stdout)
+        # re-raise para o thread chamar a UI com erro (se desejar)
+        raise
+
+
 
 
 #=======================================================================================================================
 #                  FUNÇÃO EXTRA - Coletar e salvar todos os grupos disponíveis em CSV
 #=======================================================================================================================
+
+
+# def guardar_grupos_disponiveis():
+#     global driver, action, APP_DATA
+#     print("Iniciando a coleta dos grupos disponíveis...")
+
+#     # coleta
+#     grupos_coletados = []
+
+#     # Tipo de consórcio selecionado
+#     tipo_consorcio = driver.find_element(
+#         By.XPATH, '//div[@role="combobox" and @id="codigoProduto"]'
+#     ).get_attribute('innerText').strip().lower()
+
+#     # normaliza para nome de arquivo
+#     tipo_consorcio = _strip_accents(tipo_consorcio)                  # remove acentos
+#     tipo_consorcio = re.sub(r'[^\w\s-]', '', tipo_consorcio)         # remove tudo que não for letra/número/_
+#     tipo_consorcio = tipo_consorcio.strip().replace(' ', '_')         # troca espaços por _
+
+#     # Expandir para 50 linhas
+#     botao_linhas = driver.find_element(By.XPATH, '//div[@role="combobox" and @id="pageSizeId"]')
+#     action.move_to_element(botao_linhas).pause(random.uniform(0.1, 0.5)).click(botao_linhas).perform()
+#     human_sleep(0.5, 1.5)
+#     opcao_50 = driver.find_element(By.XPATH, '//span[@class="ids-option__text" and text()="50"]')
+#     action.move_to_element(opcao_50).pause(random.uniform(0.1, 0.5)).click(opcao_50).perform()
+#     human_sleep(1, 3)
+#     print("Tabela atualizada para mostrar 50 linhas.")
+
+#     while True:
+#         tabela = driver.find_element(By.XPATH, '//*[@aria-describedby="tabelaGrupos"]')
+#         linhas_tabela = tabela.find_elements(By.XPATH, './/tbody/tr')
+
+#         for linha in linhas_tabela:
+#             colunas = linha.find_elements(By.TAG_NAME, 'td')
+#             botao_grupo = colunas[0].find_element(By.TAG_NAME, 'button')
+#             numero_grupo = (botao_grupo.text or '').strip()
+#             if numero_grupo:
+#                 grupos_coletados.append(str(numero_grupo))
+
+#         # próxima página?
+#         try:
+#             botao_proxima_pagina = driver.find_element(By.XPATH, '//button[@id="nextPageId"]')
+#             if botao_proxima_pagina.get_attribute("disabled"):
+#                 print("Fim das páginas. Nenhuma próxima disponível.")
+#                 break
+#             action.move_to_element(botao_proxima_pagina).pause(random.uniform(0.2, 0.6)).click(botao_proxima_pagina).perform()
+#             human_sleep(1.5, 3)
+#             print("Indo para a próxima página...")
+#         except Exception as e:
+#             print("Não foi possível ir para a próxima página:", e)
+#             break
+
+#     # remove duplicados desta sessão
+#     grupos_coletados = list(dict.fromkeys(grupos_coletados))  # preserva ordem e unicidade
+#     print(f"Coleta concluída. Total únicos nesta sessão: {len(grupos_coletados)}")
+#     print(grupos_coletados)
+
+#     # ===== salvamento sem duplicar =====
+#     APP_DATA.mkdir(parents=True, exist_ok=True)
+#     nome_arquivo = APP_DATA / f'grupos_{tipo_consorcio}.csv'
+
+#     existentes_set = set()
+#     if nome_arquivo.exists():
+#         try:
+#             df_existentes = pd.read_csv(nome_arquivo, sep=';', dtype={'grupo': str})
+#             # normaliza (tira espaços e NaN)
+#             df_existentes['grupo'] = df_existentes['grupo'].astype(str).str.strip()
+#             existentes_set = set(df_existentes['grupo'].dropna().tolist())
+#         except Exception as e:
+#             print(f"Aviso: não foi possível ler o CSV existente ({e}). Vou recriar do zero.")
+
+#     # filtra apenas novos
+#     novos = [g for g in grupos_coletados if g not in existentes_set]
+
+#     if nome_arquivo.exists() and len(novos) > 0:
+#         # append sem header
+#         pd.DataFrame(novos, columns=['grupo']).to_csv(nome_arquivo, sep=';', index=False, mode='a', header=False)
+#         print(f"Acrescentados {len(novos)} novos grupos (sem duplicar).")
+#     elif not nome_arquivo.exists():
+#         # cria arquivo com header
+#         pd.DataFrame(grupos_coletados, columns=['grupo']).to_csv(nome_arquivo, sep=';', index=False)
+#         print(f"Arquivo criado com {len(grupos_coletados)} grupos.")
+#     else:
+#         print("Nenhum grupo novo para acrescentar (todos já estavam salvos).")
+
+#     print(f"Grupos salvos em: {nome_arquivo}")
+
+
 def _strip_accents(s: str) -> str:
     return ''.join(c for c in unicodedata.normalize('NFKD', s) if not unicodedata.combining(c))
 
@@ -784,92 +945,6 @@ def inserir_dados_cliente_js():
     return res
 
 
-def guardar_grupos_disponiveis():
-    global driver, action, APP_DATA
-    print("Iniciando a coleta dos grupos disponíveis...")
-
-    # coleta
-    grupos_coletados = []
-
-    # Tipo de consórcio selecionado
-    tipo_consorcio = driver.find_element(
-        By.XPATH, '//div[@role="combobox" and @id="codigoProduto"]'
-    ).get_attribute('innerText').strip().lower()
-
-    # normaliza para nome de arquivo
-    tipo_consorcio = _strip_accents(tipo_consorcio)                  # remove acentos
-    tipo_consorcio = re.sub(r'[^\w\s-]', '', tipo_consorcio)         # remove tudo que não for letra/número/_
-    tipo_consorcio = tipo_consorcio.strip().replace(' ', '_')         # troca espaços por _
-
-    # Expandir para 50 linhas
-    botao_linhas = driver.find_element(By.XPATH, '//div[@role="combobox" and @id="pageSizeId"]')
-    action.move_to_element(botao_linhas).pause(random.uniform(0.1, 0.5)).click(botao_linhas).perform()
-    human_sleep(0.5, 1.5)
-    opcao_50 = driver.find_element(By.XPATH, '//span[@class="ids-option__text" and text()="50"]')
-    action.move_to_element(opcao_50).pause(random.uniform(0.1, 0.5)).click(opcao_50).perform()
-    human_sleep(1, 3)
-    print("Tabela atualizada para mostrar 50 linhas.")
-
-    while True:
-        tabela = driver.find_element(By.XPATH, '//*[@aria-describedby="tabelaGrupos"]')
-        linhas_tabela = tabela.find_elements(By.XPATH, './/tbody/tr')
-
-        for linha in linhas_tabela:
-            colunas = linha.find_elements(By.TAG_NAME, 'td')
-            botao_grupo = colunas[0].find_element(By.TAG_NAME, 'button')
-            numero_grupo = (botao_grupo.text or '').strip()
-            if numero_grupo:
-                grupos_coletados.append(str(numero_grupo))
-
-        # próxima página?
-        try:
-            botao_proxima_pagina = driver.find_element(By.XPATH, '//button[@id="nextPageId"]')
-            if botao_proxima_pagina.get_attribute("disabled"):
-                print("Fim das páginas. Nenhuma próxima disponível.")
-                break
-            action.move_to_element(botao_proxima_pagina).pause(random.uniform(0.2, 0.6)).click(botao_proxima_pagina).perform()
-            human_sleep(1.5, 3)
-            print("Indo para a próxima página...")
-        except Exception as e:
-            print("Não foi possível ir para a próxima página:", e)
-            break
-
-    # remove duplicados desta sessão
-    grupos_coletados = list(dict.fromkeys(grupos_coletados))  # preserva ordem e unicidade
-    print(f"Coleta concluída. Total únicos nesta sessão: {len(grupos_coletados)}")
-    print(grupos_coletados)
-
-    # ===== salvamento sem duplicar =====
-    APP_DATA.mkdir(parents=True, exist_ok=True)
-    nome_arquivo = APP_DATA / f'grupos_{tipo_consorcio}.csv'
-
-    existentes_set = set()
-    if nome_arquivo.exists():
-        try:
-            df_existentes = pd.read_csv(nome_arquivo, sep=';', dtype={'grupo': str})
-            # normaliza (tira espaços e NaN)
-            df_existentes['grupo'] = df_existentes['grupo'].astype(str).str.strip()
-            existentes_set = set(df_existentes['grupo'].dropna().tolist())
-        except Exception as e:
-            print(f"Aviso: não foi possível ler o CSV existente ({e}). Vou recriar do zero.")
-
-    # filtra apenas novos
-    novos = [g for g in grupos_coletados if g not in existentes_set]
-
-    if nome_arquivo.exists() and len(novos) > 0:
-        # append sem header
-        pd.DataFrame(novos, columns=['grupo']).to_csv(nome_arquivo, sep=';', index=False, mode='a', header=False)
-        print(f"Acrescentados {len(novos)} novos grupos (sem duplicar).")
-    elif not nome_arquivo.exists():
-        # cria arquivo com header
-        pd.DataFrame(grupos_coletados, columns=['grupo']).to_csv(nome_arquivo, sep=';', index=False)
-        print(f"Arquivo criado com {len(grupos_coletados)} grupos.")
-    else:
-        print("Nenhum grupo novo para acrescentar (todos já estavam salvos).")
-
-    print(f"Grupos salvos em: {nome_arquivo}")
-
-
 
 
 
@@ -882,13 +957,17 @@ def buscar_consorcio_cliente():
     global grupo_encontrado, cpf_atual, cliente_atual
     global driver
     
-    #list_grupos = ['050127', '50130', '020257', '020269', '020267']  # Exemplo de lista de grupos para ignorar <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-    #carregar lista de grupos do arquivo CSV
-    tipo_consorcio = str(cliente_atual['tp_produto']).strip().lower()
-    nome_arquivo = f'grupos_{tipo_consorcio.replace(" ", "_")}.csv'
-    df_grupos_ignorar = pd.read_csv(nome_arquivo, sep=';')
-    list_grupos = df_grupos_ignorar['grupo'].tolist()
-    print(f"Lista de grupos a ignorar carregada do arquivo {nome_arquivo}: {list_grupos}")
+    # === carregar lista de grupos a ignorar ===
+    tp = str(cliente_atual['tp_produto'] or '').strip().lower()
+    try:
+        csv_path = _find_user_file(f'grupos_{_normalize_tipo(tp)}.csv')
+        print(f"Usando lista de grupos: {csv_path}")
+        df_grupos_ignorar = pd.read_csv(csv_path, sep=';', dtype={'grupo': str})
+        list_grupos = df_grupos_ignorar['grupo'].astype(str).str.strip().tolist()
+    except FileNotFoundError:
+        print(f"⚠️ Não encontrei grupos para '{tp}'. Vou seguir sem ignorar nenhum grupo.")
+        list_grupos = []
+
     print("Iniciando a busca pelo melhor consórcio para o cliente...")
 
     
@@ -2344,20 +2423,14 @@ def _start_driver_bg():
     global driver_thread, _driver_keepalive_evt
 
     try:
-        # desabilita botão UI
         root.after(0, lambda: btn_iniciar_driver.configure(state="disabled"))
-
-        iniciar_driver()  # cria driver com use_subprocess=True (mantém stealth)
-
-        # driver iniciado: avisa o usuário
+        iniciar_driver()  # cria o driver
         root.after(0, lambda: messagebox.showinfo("OK", "Driver iniciado!"))
-
-        # aguarda até que o app peça para encerrar (isso mantém o thread vivo)
-        _driver_keepalive_evt.wait()   # <-- bloqueia aqui até on_close setar o evento
-
+        _driver_keepalive_evt.wait()
     except Exception as e:
+        msg = f"{e.__class__.__name__}: {e}"
         root.after(0, lambda: btn_iniciar_driver.configure(state="normal"))
-        root.after(0, lambda: messagebox.showerror("Erro", str(e)))
+        root.after(0, lambda m=msg: messagebox.showerror("Erro", m)) 
 
 
 def start_driver_thread():
@@ -2470,16 +2543,16 @@ def main():
 
 
 
-    # =================== Frame: Buscar e guardar Grupos (Antigos) ===================
-    cred_frame = tk.LabelFrame(root, text="Guardar os códigos de Grupos para desconsiderar", bg=cor_fundo_frame, fg=cor_texto_label, padx=10, pady=4)
-    cred_frame.pack(padx=15, pady=5, fill="x")
-    cred_frame.columnconfigure(1, weight=1)
+    # # =================== Frame: Buscar e guardar Grupos (Antigos) ===================
+    # cred_frame = tk.LabelFrame(root, text="Guardar os códigos de Grupos para desconsiderar", bg=cor_fundo_frame, fg=cor_texto_label, padx=10, pady=4)
+    # cred_frame.pack(padx=15, pady=5, fill="x")
+    # cred_frame.columnconfigure(1, weight=1)
 
-    btn_salvar_grupos = ttk.Button(
-        cred_frame, text="Salvar os códigos de Grupos", style="Custom.TButton",
-        command=guardar_grupos_disponiveis
-                        )
-    btn_salvar_grupos.grid(row=0, column=0, columnspan=2, sticky="ew", padx=5, pady=(7, 4))
+    # btn_salvar_grupos = ttk.Button(
+    #     cred_frame, text="Salvar os códigos de Grupos", style="Custom.TButton",
+    #     command=guardar_grupos_disponiveis
+    #                     )
+    # btn_salvar_grupos.grid(row=0, column=0, columnspan=2, sticky="ew", padx=5, pady=(7, 4))
 
 
 
@@ -2535,8 +2608,6 @@ def main():
     #     pass
 
 if __name__ == "__main__":
-    import multiprocessing as mp
-    mp.freeze_support()   # OK manter mesmo no macOS
     main()
     
 #---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
