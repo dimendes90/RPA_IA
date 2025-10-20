@@ -1,4 +1,3 @@
-
 # Módulos da Biblioteca Padrão do Python
 import os                   # Interage com o sistema operacional (manipulação de arquivos, variáveis de ambiente).
 import sys                  # Fornece acesso a variáveis e funções específicas do interpretador (ex.: argumentos de linha de comando).
@@ -22,9 +21,9 @@ import threading            # Threading para execução de tarefas em background
 import pandas as pd         # Ferramenta essencial para análise e manipulação de dados estruturados (tabelas/DataFrames).
 import numpy as np          # Suporte para arrays e matrizes de alta performance, fundamental para computação numérica.
 import tkinter as tk        # Biblioteca padrão para criação de Interfaces Gráficas (GUIs).
-from tkinter import ttk, scrolledtext, messagebox # Componentes avançados (widgets), área de texto com scroll e caixas de diálogo do Tkinter.
+from tkinter import scrolledtext, messagebox # Componentes avançados (widgets), área de texto com scroll e caixas de diálogo do Tkinter.
 import undetected_chromedriver as uc # type: ignore # Um driver para Selenium que tenta evitar ser detectado por sites.
-
+import tkinter.ttk as ttk
 
 # ---
 
@@ -39,11 +38,9 @@ from selenium.common.exceptions import TimeoutException # Exceção disparada qu
 from selenium.common.exceptions import NoSuchElementException # Exceção disparada quando um elemento não é encontrado na página.
 from selenium.common.exceptions import InvalidSessionIdException, WebDriverException # Exceções gerais relacionadas a problemas de comunicação ou estado da sessão do driver.
 from selenium.webdriver.common.keys import Keys
-# ---
+
 import atexit
 import unicodedata
-
-
 
 # # Configuração de Opções (Mantida como estava no original para contexto, mas movida para o final)
 # options = Options()
@@ -52,8 +49,6 @@ import unicodedata
 # options.add_experimental_option("detach", True)  # Evita que a aba feche com o script
 
 #=======================================================================================================================
-
-
 
 # CONFIGURAÇÃO - ajuste conforme seu ambiente
 #PROFILE_DIR = r"C:/selenium/chrome-profile"   # seu user-data-dir
@@ -80,12 +75,90 @@ df_atual = None
 cliente_atual = None
 cpf_atual = None
 grupo_encontrado = False
-root = None
+#root = None
 driver_started = False
 driver_thread = None
 _driver_keepalive_evt = threading.Event()
 
 
+
+
+
+def ui_alert(title, msg, kind="info"):
+    def _show():
+        if 'root' not in globals() or not root or not root.winfo_exists():
+            print(f"[ALERTA] {title}: {msg}")
+            return
+        try:
+            root.lift(); root.focus_force()
+        except: pass
+        top = tk.Toplevel(root); top.withdraw(); top.transient(root)
+        try: top.attributes("-topmost", True)
+        except: pass
+        top.update_idletasks(); top.deiconify(); top.lift(); top.focus_force()
+        try:
+            if kind == "warning":   messagebox.showwarning(title, msg, parent=top)
+            elif kind == "error":   messagebox.showerror(title, msg, parent=top)
+            else:                   messagebox.showinfo(title, msg, parent=top)
+        finally:
+            try: top.destroy()
+            except: pass
+    try:
+        root.after(0, _show)
+    except Exception:
+        print(f"[ALERTA] {title}: {msg}")
+
+
+
+
+
+
+def on_quit():
+    # Pare threads/driver aqui
+    try:
+        if driver: driver.quit()
+    except: pass
+    try: root.quit()
+    except: pass
+    try: root.destroy()
+    except: pass
+
+
+
+
+
+
+# ====== MODAL (para erros/confirm) ======
+def show_modal(title, message, kind="info"):
+    """Janela modal simples; bloqueia até clicar OK."""
+    def _open():
+        win = tk.Toplevel(root)
+        win.title(title)
+        win.transient(root)
+        win.grab_set()
+        win.configure(bg="#0C1B39")
+        win.resizable(False, False)
+
+        # estética básica
+        pad = {"padx": 16, "pady": 10}
+        lbl = tk.Label(win, text=message, fg="white", bg="#0C1B39",
+                       font=("Helvetica", 12))
+        lbl.pack(**pad)
+
+        btn = ttk.Button(win, text="OK", command=win.destroy)
+        btn.pack(pady=(0, 14))
+        win.update_idletasks()
+
+        # centraliza no root
+        rw, rh = root.winfo_width(), root.winfo_height()
+        rx, ry = root.winfo_rootx(), root.winfo_rooty()
+        ww, wh = win.winfo_width(), win.winfo_height()
+        win.geometry(f"{ww}x{wh}+{rx + (rw-ww)//2}+{ry + (rh-wh)//2}")
+
+        win.lift()
+        win.focus_force()
+        root.wait_window(win)
+    root.after(0, _open)
 
 #=======================================================================================================================
 # Funções auxiliares
@@ -98,16 +171,61 @@ def driver_ativo(drv):
     except:
         return False
 
+
+def _get_app_path() -> Path:
+    """
+    Retorna o diretório base do executável/script, lidando com 
+    ambientes interativos (como Jupyter) e PyInstaller.
+    """
+    
+    # 1. Caso PyInstaller (Executável Empacotado)
+    if getattr(sys, 'frozen', False):
+        # Em Mac, tenta encontrar a pasta que contém o .app
+        if sys.platform == 'darwin':
+            current_path = Path(sys.executable)
+            for parent in current_path.parents:
+                if parent.suffix == '.app':
+                    # Retorna o diretório ao lado do .app
+                    return parent.parent 
+        
+        # Para outros sistemas ou fallback, usa o diretório do executável
+        return Path(sys.executable).parent
+
+    # 2. Caso Script Normal ou Ambiente Interativo
+    try:
+        # Tenta usar __file__ (funciona se for um script normal)
+        # O 'globals()' aqui é apenas para verificar a variável em certos contextos, 
+        # mas a simples tentativa de acesso é o suficiente.
+        return Path(__file__).resolve().parent 
+    except NameError:
+        # Ocorre em ambientes interativos (Jupyter, iPython, etc.)
+        # Retorna o Diretório de Trabalho Atual como fallback
+        return Path.cwd() 
+
+
 def _find_user_file(name: str) -> Path:
-    candidates = [
-        _executable_dir() / name,   # ao lado do run_app
-        Path.cwd() / name,          # diretório atual
-        APP_DATA / name,            # ~/.selecao_cotas
-    ]
-    for p in candidates:
-        if p.exists():
-            return p
-    raise FileNotFoundError(f"Arquivo '{name}' não encontrado. Coloque-o ao lado do executável ou em {APP_DATA}.")
+    """
+    Procura o arquivo do usuário SOMENTE na mesma pasta do executável/script.
+    """
+    app_dir = _get_app_path()
+    candidate = app_dir / name
+    
+    if candidate.exists():
+        # Verificação de segurança adicional para o .xlsx
+        if candidate.suffix == '.xlsx':
+            return candidate
+        else:
+            raise FileNotFoundError(f"Arquivo '{name}' encontrado, mas não é um .xlsx válido.")
+    
+    raise FileNotFoundError(
+        f"Arquivo '{name}' não encontrado. O arquivo deve estar na mesma pasta do executável:\n"
+        f"- {str(app_dir)}"
+    )
+
+
+
+
+
 
 # utilitário: delays "humanos"
 def human_sleep(a=0.05, b=0.5):
@@ -181,14 +299,32 @@ def _shutdown():
 if not getattr(sys, "frozen", False):  # só em modo dev
     atexit.register(_shutdown)
 
+# def on_close():
+#     try:
+#         _driver_keepalive_evt.set()   # libera o thread
+#     except: pass
+    
+#     try:
+#         if driver: driver.quit()
+#     except: pass
+    
+#     #root.destroy()
+
+#     try:
+#       root.quit()   # sai do loop
+#     except: pass
+
 def on_close():
     try:
-        _driver_keepalive_evt.set()   # libera o thread
+        _driver_keepalive_evt.set()
     except: pass
     try:
         if driver: driver.quit()
     except: pass
-    root.destroy()
+    try:
+        root.quit()   # sai do loop (não destrói a janela ainda)
+    except: pass
+    # root.destroy() será chamado pelo on_quit() quando for finalizar de vez
 
 
 def is_nan(x):
@@ -410,10 +546,39 @@ def ensure_uf_dropdown_closed_and_selected(driver, timeout=6):
         except TimeoutException:
             return False
 
+# def _executable_dir() -> Path: -> OLD
+#     if getattr(sys, 'frozen', False):
+#         return Path(sys.executable).resolve().parent  # .../SelecionaCotas.app/Contents/MacOS
+#     return Path(__file__).resolve().parent
+
 def _executable_dir() -> Path:
-    if getattr(sys, 'frozen', False):
-        return Path(sys.executable).resolve().parent  # .../SelecionaCotas.app/Contents/MacOS
-    return Path(__file__).resolve().parent
+    """
+    Retorna a pasta base do executável/script de forma robusta:
+    - App empacotado (PyInstaller): pasta do executável
+    - Script normal: pasta do arquivo principal
+    - Jupyter/REPL: diretório atual
+    """
+    # PyInstaller (onefile/onedir)
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+
+    # Script normal (quando __main__.__file__ existe)
+    main_file = getattr(sys.modules.get("__main__"), "__file__", None)
+    if main_file:
+        return Path(main_file).resolve().parent
+
+    # Fallback 1: caminho passado na linha de comando
+    if sys.argv and sys.argv[0]:
+        try:
+            return Path(sys.argv[0]).resolve().parent
+        except Exception:
+            pass
+
+    # Fallback 2: ambiente interativo (Jupyter/REPL)
+    return Path.cwd()
+
+
+
 
 def find_data_file(name: str) -> Path:
     exe_dir = _executable_dir()
@@ -523,112 +688,119 @@ def atualizar_status_cliente(cpf_cliente, novo_status, caminho='base_clientes.xl
 
 # #Google Chrome Version 141 (testar sem versão 141)
 def iniciar_driver():
-    global driver, wait, action, driver_started
+  global driver, wait, action, driver_started
 
-    if driver_started and driver is not None and driver_ativo(driver):
-        print("Info: O navegador já está iniciado.")
-        return
+  if driver_started and driver is not None and driver_ativo(driver):
+      print("Info: O navegador já está iniciado.")
+      return
 
-    options = uc.ChromeOptions()
+  options = uc.ChromeOptions()
 
-    # MANTER o mesmo PROFILE_DIR (use sua constante PROFILE_DIR)
-    # isso preserva cookies, extensões e comportamento "real" entre execuções
-    options.add_argument(f"--user-data-dir={PROFILE_DIR}")
-    options.add_argument(f"--user-agent={USER_AGENT}")
+  # MANTER o mesmo PROFILE_DIR (use sua constante PROFILE_DIR)
+  # isso preserva cookies, extensões e comportamento "real" entre execuções
+  options.add_argument(f"--user-data-dir={PROFILE_DIR}")
+  options.add_argument(f"--user-agent={USER_AGENT}")
 
-    # Stealth / invisibilidade (mantidos do original)
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--lang=pt-BR")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-infobars")
+  # Stealth / invisibilidade (mantidos do original)
+  options.add_argument("--disable-blink-features=AutomationControlled")
+  options.add_argument("--lang=pt-BR")
+  options.add_argument("--no-sandbox")
+  options.add_argument("--disable-dev-shm-usage")
+  options.add_argument("--disable-infobars")
 
-    # Limites de processos e ajustes para reduzir consumo de RAM
-    options.add_argument("--renderer-process-limit=3")
-    options.add_argument("--process-per-site")
-    options.add_argument("--disable-site-isolation-trials")
-    options.add_argument("--disk-cache-size=1")  # reduz cache em disco
+  # Limites de processos e ajustes para reduzir consumo de RAM
+  options.add_argument("--renderer-process-limit=3")
+  options.add_argument("--process-per-site")
+  options.add_argument("--disable-site-isolation-trials")
+  options.add_argument("--disk-cache-size=1")  # reduz cache em disco
 
-    # Menos "ruído" em background (pouco impacto em stealth)
-    options.add_argument("--disable-background-networking")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-sync")
+  # Menos "ruído" em background (pouco impacto em stealth)
+  options.add_argument("--disable-background-networking")
+  options.add_argument("--disable-extensions")
+  options.add_argument("--disable-sync")
 
-    # Caminho explícito do Chrome (macOS)
-    options.binary_location = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  # Caminho explícito do Chrome (macOS)
+  options.binary_location = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
-    print("Iniciando o Chrome com undetected-chromedriver (version_main=141)...")
+  print("Iniciando o Chrome com undetected-chromedriver (version_main=141)...")
 
-    try:
-        # use_subprocess=False é preferível no macOS + onefile
-        driver = uc.Chrome(
-            options=options,
-            version_main=141,       # força a major correta do Chrome (sua versão: 141.x)
-            use_subprocess=False,
-            headless=False
-        )
-        driver_started = True
-        wait = WebDriverWait(driver, 15)
-        action = ActionChains(driver)
+  try:
+      # use_subprocess=False é preferível no macOS + onefile
+      driver = uc.Chrome(
+          options=options,
+          version_main=141,       # força a major correta do Chrome (sua versão: 141.x)
+          use_subprocess=False,
+          headless=False
+      )
+      driver_started = True
+      wait = WebDriverWait(driver, 15)
+      action = ActionChains(driver)
 
-        # janela realista
-        try:
-            driver.set_window_size(1199, 889)
-        except Exception:
-            pass
+      # janela realista
+      try:
+          driver.set_window_size(1199, 889)
+      except Exception:
+          pass
 
-        # pequeno delay humano
-        human_sleep(0.1, 1.1)
+      # pequeno delay humano
+      human_sleep(0.1, 1.1)
 
-        # stealth JS injetado (mantém invisibilidade)
-        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": """
-                try {
-                  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                } catch(e) {}
-                window.chrome = window.chrome || { runtime: {} };
-                try {
-                  Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
-                } catch(e) {}
-                try {
-                  Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR','pt','en-US','en'] });
-                } catch(e) {}
-            """
-        })
-        # override UA via CDP (faça em try/except)
-        try:
-            driver.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": USER_AGENT})
-        except Exception:
-            pass
+      # stealth JS injetado (mantém invisibilidade)
+      driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+          "source": """
+              try {
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+              } catch(e) {}
+              window.chrome = window.chrome || { runtime: {} };
+              try {
+                Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+              } catch(e) {}
+              try {
+                Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR','pt','en-US','en'] });
+              } catch(e) {}
+          """
+      })
+      # override UA via CDP (faça em try/except)
+      try:
+          driver.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": USER_AGENT})
+      except Exception:
+          pass
 
-        # Limpar cache/cookies iniciais para não inflar memória
-        try:
-            driver.execute_cdp_cmd("Network.enable", {})
-            driver.execute_cdp_cmd("Network.clearBrowserCache", {})
-            driver.execute_cdp_cmd("Network.clearBrowserCookies", {})
-        except Exception:
-            pass
+      # Limpar cache/cookies iniciais para não inflar memória
+      try:
+          driver.execute_cdp_cmd("Network.enable", {})
+          driver.execute_cdp_cmd("Network.clearBrowserCache", {})
+          driver.execute_cdp_cmd("Network.clearBrowserCookies", {})
+      except Exception:
+          pass
 
-        # Teste rápido de navegação
-        driver.get("https://www.google.com")
-        print("Título inicial:", driver.title)
+      # Teste rápido de navegação
+      driver.get("https://www.google.com")
+      print("Título inicial:", driver.title)
 
-        # salvar cookies (se quiser)
-        try:
-            save_cookies(driver, COOKIES_FILE)
-        except Exception:
-            pass
+      # salvar cookies (se quiser)
+      try:
+          save_cookies(driver, COOKIES_FILE)
+      except Exception:
+          pass
 
-        print("Fluxo finalizado sem exceções aparentes")
-        return driver
+      print("Fluxo finalizado sem exceções aparentes")
+      #status_var.set("Driver iniciado.")
+      #ui_alert("OK", "Driver iniciado!", "info")
+      #toast("Driver iniciado.", "success")
+      
+      return driver
 
-    except Exception as exc:
-        # Log completo para debugging; NÃO force driver.quit() pois driver pode não existir
-        import traceback, sys
-        print("Erro ao criar/iniciar driver:")
-        traceback.print_exc(file=sys.stdout)
-        # re-raise para o thread chamar a UI com erro (se desejar)
-        raise
+  except Exception as exc:
+      # Log completo para debugging; NÃO force driver.quit() pois driver pode não existir
+      import traceback, sys
+      print("Erro ao criar/iniciar driver:")
+      traceback.print_exc(file=sys.stdout)
+      # re-raise para o thread chamar a UI com erro (se desejar)
+      raise
+  
+
+
 
 
 
@@ -996,244 +1168,364 @@ def buscar_consorcio_cliente():
         valor_maximo_float = float(valor_maximo_formatado)
         print(f"Valor máximo extraído: R$ {valor_maximo_float:.2f}")
 
-
-    ### Selecionar Tabela e interagir com dropdowns - Grupos ### ### ###
-    tabela = driver.find_element(By.XPATH, '//*[@aria-describedby="tabelaGrupos"]') # localizar a tabela
-    linhas_tabela = tabela.find_elements(By.XPATH, './/tbody/tr') # localizar todas as linhas da tabela, exceto o cabeçalho
-
-
-    #===========================================
-    ##########  1 - Busca de GRUPO #############
-    #===========================================
-
-    # Percorrer as linhas da tabela
-    for linha in linhas_tabela:
-        colunas = linha.find_elements(By.TAG_NAME, 'td')
-        botao_grupo = colunas[0].find_element(By.TAG_NAME, 'button')
-        numero_grupo = botao_grupo.text.strip()
-        print(f"Número do grupo: {numero_grupo}")
-        
-        #ignorar lista de grupos
-        if numero_grupo in list_grupos:
-            print(f"Grupo {numero_grupo} está na lista de grupos para ignorar. Pulando...")
-            continue
-        
-        
-        action.move_to_element(botao_grupo).pause(random.uniform(0.2, 0.7)).click(botao_grupo).perform()
-        human_sleep(4, 5)
+    # Expandir para 50 linhas
+    botao_linhas = driver.find_element(By.XPATH, '//div[@role="combobox" and @id="pageSizeId"]')
+    action.move_to_element(botao_linhas).pause(random.uniform(0.1, 0.2)).click(botao_linhas).perform()
+    human_sleep(0.1, 0.2)
+    opcao_50 = driver.find_element(By.XPATH, '//span[@class="ids-option__text" and text()="50"]')
+    action.move_to_element(opcao_50).pause(random.uniform(0.1, 0.2)).click(opcao_50).perform()
+    human_sleep(0.1, 0.2)
+    print("Tabela atualizada para mostrar 50 linhas.")
 
 
-        #### > Clicar em exibir Créditos Disponíveis
-        WebDriverWait(driver, 12).until(EC.presence_of_element_located((By.XPATH, '//span[contains(text(), " exibir créditos disponíveis ")]')))
-        botao_exibir_creditos = driver.find_element(By.XPATH, '//span[contains(text(), " exibir créditos disponíveis ")]')
-        action.move_to_element(botao_exibir_creditos).pause(random.uniform(0.2, 0.7)).click(botao_exibir_creditos).perform()
-        human_sleep(2, 2.5)
+    grupo_localizado = True
+    ### - LOOP Principal - Roda ate ACHAR o grupo (muda para false <-***
+    while grupo_localizado:
+      print("inciando processo....")
+      ### Selecionar Tabela e interagir com dropdowns - Grupos ### ### ###
+      
+      WebDriverWait(driver,10).until(EC.presence_of_element_located((By.XPATH, '//*[@aria-describedby="tabelaGrupos"]')))
+      tabela = driver.find_element(By.XPATH, '//*[@aria-describedby="tabelaGrupos"]') # localizar a tabela
+      linhas_tabela = tabela.find_elements(By.XPATH, './/tbody/tr') # localizar todas as linhas da tabela, exceto o cabeçalho
+      human_sleep(0.2, 0.4)
+      print(len(linhas_tabela))
+      #===========================================
+      ##########  1 - Busca de GRUPO #############
+      #===========================================
 
-        
-        ### >>> TELA DE CRÉDITOS <<<###
-
-
-        # Esperar a tabela de créditos ser exibida
-        WebDriverWait(driver, 12).until(EC.presence_of_element_located((By.XPATH, "//p[normalize-space()='créditos disponíveis']/following-sibling::div/table")))
-        tabela_creditos = driver.find_element(By.XPATH, "//p[normalize-space()='créditos disponíveis']/following-sibling::div/table")
-        linhas_creditos = tabela_creditos.find_elements(By.XPATH, './/tbody/tr')
-
-        # Variáveis para armazenar a melhor opção encontrada
-        melhor_opcao_encontrada = None  
-        maior_credito_encontrado = 0.0  
-        codigo_bem_selecionado = None  # Variável para armazenar o código do bem selecionado - PARA CLICAR DEPOIS
-        
-        print("--- Iniciando análise das linhas de crédito ---")
-        print(f"Total de linhas de crédito encontradas: {len(linhas_creditos)}")
-
-
-        #=====================================================
-        ### ### ### Buscar CREDITOS - Melhor Opção ### ### ###
-        #=====================================================
-
-        # Loop para analisar cada linha da tabela de créditos
-        for linha in linhas_creditos:
+      # Percorrer as linhas da tabela
+      for linha in linhas_tabela:
+          time.sleep(0.04)
+          try:
             colunas = linha.find_elements(By.TAG_NAME, 'td')
-            codigo_bem = colunas[0].text.strip()
-            nome_bem = colunas[1].text.strip()
-            
-            
-            #taxa_adm = colunas[2].text.strip()
-            valor_credito = colunas[3].text.strip()
-            valor_parcela = colunas[4].text.strip()
-
-            # Converter valor_parcela para float antes de comparar
-            valor_credito_float = float(valor_credito.replace('.', '').replace(',', '.'))
-            valor_parcela_float = float(valor_parcela.replace('.', '').replace(',', '.'))
-
-            print(f"Cód: {codigo_bem}, Nome: {nome_bem}, Vlr Credito: {valor_credito}, Parcela: {valor_parcela}")
-
-            ### 1 - Verifica se o valor da parcela está dentro do valor máximo permitido
-            if valor_parcela_float <= valor_maximo_float:
-                print("Valor da parcela está dentro do valor máximo permitido.")
-
-                ### 2 - Verifica se o valor do crédito é maior que o maior já encontrado
-                if valor_credito_float > maior_credito_encontrado:
-                    print(f"Nova melhor opção encontrada: Crédito R$ {valor_credito_float} com Parcela R$ {valor_parcela_float}")
-                    maior_credito_encontrado = valor_credito_float
-                    codigo_bem_selecionado = codigo_bem
-                    print(f"Código do bem selecionado: {codigo_bem_selecionado}")
+          except Exception as e:
+              time.sleep(2)
+              colunas = linha.find_elements(By.TAG_NAME, 'td')
+          
+          botao_grupo = colunas[0].find_element(By.TAG_NAME, 'button')
+          numero_grupo = botao_grupo.text.strip()
+          print(f"Número do grupo: {numero_grupo}")
+          
+          #Verificar se o grupo esta na Lista, se não tiver pula pata o proximo
+          if numero_grupo not in list_grupos:
+              print(f"Grupo {numero_grupo} NÃO está na lista de grupos. Pulando...")
+              continue
+          
+          
+          action.move_to_element(botao_grupo).pause(random.uniform(0.2, 0.7)).click(botao_grupo).perform()
+          human_sleep(4, 5)
 
 
-                    melhor_opcao_encontrada = {
-                        'codigo_bem': codigo_bem,
-                        'nome_bem': nome_bem,
-                        'valor_credito': valor_credito,
-                        'valor_parcela': valor_parcela
-                    }
-            print("--------------------------------------------------")
+          #### > Clicar em exibir Créditos Disponíveis
+          WebDriverWait(driver, 12).until(EC.presence_of_element_located((By.XPATH, '//span[contains(text(), " exibir créditos disponíveis ")]')))
+          botao_exibir_creditos = driver.find_element(By.XPATH, '//span[contains(text(), " exibir créditos disponíveis ")]')
+          action.move_to_element(botao_exibir_creditos).pause(random.uniform(0.2, 0.7)).click(botao_exibir_creditos).perform()
+          human_sleep(2, 2.5)
+
+          
+          ### >>> TELA DE CRÉDITOS <<<###
+
+
+          # Esperar a tabela de créditos ser exibida
+          WebDriverWait(driver, 12).until(EC.presence_of_element_located((By.XPATH, "//p[normalize-space()='créditos disponíveis']/following-sibling::div/table")))
+          tabela_creditos = driver.find_element(By.XPATH, "//p[normalize-space()='créditos disponíveis']/following-sibling::div/table")
+          linhas_creditos = tabela_creditos.find_elements(By.XPATH, './/tbody/tr')
+
+          # Variáveis para armazenar a melhor opção encontrada
+          melhor_opcao_encontrada = None  
+          maior_credito_encontrado = 0.0  
+          codigo_bem_selecionado = None  # Variável para armazenar o código do bem selecionado - PARA CLICAR DEPOIS
+          
+          print("--- Iniciando análise das linhas de crédito ---")
+          print(f"Total de linhas de crédito encontradas: {len(linhas_creditos)}")
+
+
+          #=====================================================
+          ### ### ### Buscar CREDITOS - Melhor Opção ### ### ###
+          #=====================================================
+
+          # Loop para analisar cada linha da tabela de créditos
+          for linha in linhas_creditos:
+              colunas = linha.find_elements(By.TAG_NAME, 'td')
+              codigo_bem = colunas[0].text.strip()
+              nome_bem = colunas[1].text.strip()
+              
+              
+              #taxa_adm = colunas[2].text.strip()
+              valor_credito = colunas[3].text.strip()
+              valor_parcela = colunas[4].text.strip()
+
+              # Converter valor_parcela para float antes de comparar
+              valor_credito_float = float(valor_credito.replace('.', '').replace(',', '.'))
+              valor_parcela_float = float(valor_parcela.replace('.', '').replace(',', '.'))
+
+              print(f"Cód: {codigo_bem}, Nome: {nome_bem}, Vlr Credito: {valor_credito}, Parcela: {valor_parcela}")
+
+              ### 1 - Verifica se o valor da parcela está dentro do valor máximo permitido
+              if valor_parcela_float <= valor_maximo_float:
+                  print("Valor da parcela está dentro do valor máximo permitido.")
+
+                  ### 2 - Verifica se o valor do crédito é maior que o maior já encontrado
+                  if valor_credito_float > maior_credito_encontrado:
+                      print(f"Nova melhor opção encontrada: Crédito R$ {valor_credito_float} com Parcela R$ {valor_parcela_float}")
+                      maior_credito_encontrado = valor_credito_float
+                      codigo_bem_selecionado = codigo_bem
+                      print(f"Código do bem selecionado: {codigo_bem_selecionado}")
+
+
+                      melhor_opcao_encontrada = {
+                          'codigo_bem': codigo_bem,
+                          'nome_bem': nome_bem,
+                          'valor_credito': valor_credito,
+                          'valor_parcela': valor_parcela
+                      }
+              print("--------------------------------------------------")
 
 
 
-        print("\n--- Análise Concluída ---")
+          print("\n--- Análise Concluída ---")
 
-        if melhor_opcao_encontrada:
-            print("✅ A melhor opção de crédito selecionada foi:")
-            print(f"Código do bem: {melhor_opcao_encontrada['codigo_bem']}")
-            print(f"Nome do bem: {melhor_opcao_encontrada['nome_bem']}")
-            print(f"Valor do crédito: {melhor_opcao_encontrada['valor_credito']}")
-            print(f"Valor da parcela: {melhor_opcao_encontrada['valor_parcela']} (Dentro do limite de R$ {valor_maximo_float})")
-            
-            grupo_encontrado = True
-            print("==================================================")
+          if melhor_opcao_encontrada:
+              print("✅ A melhor opção de crédito selecionada foi:")
+              print(f"Código do bem: {melhor_opcao_encontrada['codigo_bem']}")
+              print(f"Nome do bem: {melhor_opcao_encontrada['nome_bem']}")
+              print(f"Valor do crédito: {melhor_opcao_encontrada['valor_credito']}")
+              print(f"Valor da parcela: {melhor_opcao_encontrada['valor_parcela']} (Dentro do limite de R$ {valor_maximo_float})")
+              
+              grupo_encontrado = True
+              print("==================================================")
 
-            # Loop para encontrar a linha correspondente e clicar
-            for linha in linhas_creditos:
-                colunas = linha.find_elements(By.TAG_NAME, 'td')
-                codigo_bem_na_linha = colunas[0].text.strip()
+              # Loop para encontrar a linha correspondente e clicar
+              for linha in linhas_creditos:
+                  colunas = linha.find_elements(By.TAG_NAME, 'td')
+                  codigo_bem_na_linha = colunas[0].text.strip()
 
-                # Compara com o código da melhor opção que você já encontrou
-                if codigo_bem_na_linha == codigo_bem_selecionado:
-                    print(f"Encontrada a linha correspondente ao código {codigo_bem_selecionado}.")
+                  # Compara com o código da melhor opção que você já encontrou
+                  if codigo_bem_na_linha == codigo_bem_selecionado:
+                      print(f"Encontrada a linha correspondente ao código {codigo_bem_selecionado}.")
+          
+                      elemento_clicavel = colunas[0].find_element(By.TAG_NAME, 'u')
+                      action.move_to_element(elemento_clicavel).pause(random.uniform(0.2, 0.7)).click().perform()
+                      
+                      print(f"Elemento do código {codigo_bem_selecionado} clicado com sucesso.")
+                      human_sleep(2, 2.5)
+                      
+                      # Retirar Seguro (*Talvez mover para função separada ou trocar por um Loop de tentativas)
+
+                      #Retira somente de CPF
+                      #verificar se o tipo de documento do cliente é CPF antes de iniciar o loop
+                      if str(cliente_atual.get('tipo_cliente') or '').strip().upper() == 'CPF':
+                          #RETIRAR SEGURO - LOOP DE VERIFICAÇÃO
+                          try:
+                              botao_seguro = wait.until(EC.element_to_be_clickable((By.XPATH, '//input[@formcontrolname="checkSeguro"]')))
+                              estado_atual = botao_seguro.get_attribute('aria-pressed')
+                              print(f"🔍 Estado atual do seguro antes do loop de verificação: {estado_atual}")
+                                  
+                              # loop para garantir que botao foi clicado e estado alterado
+                              tentativas = 0
+                              max_tentativas = 15
+
+                              for tentativa in range(max_tentativas):
+                                  estado_atual = botao_seguro.get_attribute('aria-pressed')
+                                  print(f"🔍 Verificação {tentativa + 1}/{max_tentativas}: Estado atual do seguro: {estado_atual}")
+
+                                  if estado_atual == 'false':
+                                      print("✅ O seguro está DESATIVADO. Prosseguindo com o processamento dos clientes...")
+                                      break
+                                  else:
+                                      print("⚠️ O seguro ainda está ATIVADO. Tentando desativar novamente...")
+                                      # clicar no elemento atual
+                                      action.move_to_element(botao_seguro).pause(random.uniform(0.01, 0.08)).click(botao_seguro).perform()
+                                      human_sleep(0.5, 1.0) # Dá um tempo para a página processar o clique
+
+                                      # tentar re-obter o elemento (em caso de re-render)
+                                      try:
+                                          botao_seguro = driver.find_element(By.XPATH, '//input[@formcontrolname="checkSeguro"]')
+                                      except Exception:
+                                          try:
+                                              botao_seguro = WebDriverWait(driver, 5).until(
+                                                  EC.presence_of_element_located((By.XPATH, '//input[@formcontrolname="checkSeguro"]'))
+                                              )
+                                          except Exception:
+                                              print("❌ Não foi possível localizar o botão de seguro após o clique.")
+                                              break
+
+                                      # última tentativa: reportar falha se ainda estiver ativo
+                                      if tentativa == max_tentativas - 1:
+                                          estado_atual = botao_seguro.get_attribute('aria-pressed')
+                                          if estado_atual != 'false':
+                                              print("❌ Falha: O estado do seguro ainda não é 'false' após várias tentativas. Necessário revisão manual.")
+                          except TimeoutException:
+                              print("❌ Erro: Tempo esgotado. O botão de seguro não foi encontrado ou não se tornou clicável em 10 segundos.")
+                          except Exception as e:
+                              print(f"❌ Ocorreu um erro inesperado ao interagir com o botão de seguro: {e}")
+                      else:
+                          human_sleep(1, 1.5)
+      
+
+                      ### >>> Clicar em CONTRATAR COTA
+                      WebDriverWait(driver, 10).until(
+                                                      EC.presence_of_element_located((By.XPATH, '//span[contains(text(), " contratar cota ")]'))
+                                                    )
+                      botao_contratar_cota = driver.find_element(By.XPATH, '//span[contains(text(), " contratar cota ")]')
+                      action.move_to_element(botao_contratar_cota).pause(random.uniform(0.3, 0.7)).click(botao_contratar_cota).perform()
+                      human_sleep(1.5, 2)
+                      print("Clicado em CONTRATAR COTA, aguardando próxima tela...")
+
+                      #Alterando booleano para assegurar que o loop principal nao vai rodar
+                      grupo_localizado = False
+
+                      #===================================================
+                      #===================================================
+                      #===================================================
+                      # Chamar a função para preencher os dados pessoais
+                      
+                      if str(cliente_atual.get('tipo_cliente') or '').strip().upper() == 'CPF':
+                        sucesso_preenchimento = preencher_dados_pessoais()
+
+                      else:
+      
+                        sucesso_preenchimento = preencher_dados_PJ()
+
+                      #Checar se o preenchimento foi bem sucedido e atualizar o status no CSV
+                      if sucesso_preenchimento:
+                          print("✅ Dados pessoais preenchidos com sucesso.")
+                          atualizar_status_cliente(cpf_atual, "Finalizado")
+                          #status_var.set("Finalizado.")
+                          ui_alert("Finalizado", "Infos Preenchidas - Clique em CONTRATAR!", "info")
+
+
+                          #toast("Infos preenchidas — clique em CONTRATAR!", "success", timeout=6000)
+
+                      else:
+                          
+                          print("❌ Falha ao preencher os dados pessoais.")
+                          atualizar_status_cliente(cpf_atual, "Erro")
+                          #status_var.set("Erro")
+                          ui_alert("erro", "Ops, algo deu errado, verifique e preencha manualmente ou reinicie o processo!", "info")
+
+                          #toast("Algo deu errado, termine manualmente ou reiniciei o processo", "Ops", timeout=6000)
+
+
+                      #===================================================
+                      #===================================================
+                      #===================================================
+
+                      break
+                  
+              # Fim do loop de busca por grupos
+          else:
+              print(f"❌ Nenhuma linha de crédito foi encontrada com parcela menor ou igual a R$ {valor_maximo_float}.")
+              #garante que a variavel para manter o loop principal e True
+              grupo_localizado = True
+
+          # Se grupo Não encontrado, clicar em voltar e tentar o próximo grupo
+          if not grupo_encontrado:
+              print(f"⚠️ Nenhuma opção válida encontrada no grupo {numero_grupo}. Voltando para a lista de grupos...")
+              botao_voltar = driver.find_element(By.XPATH, '//p[contains(text(), " voltar para grupos")]')
+              action.move_to_element(botao_voltar).pause(random.uniform(0.2, 0.7)).click(botao_voltar).perform()
+              human_sleep(0.8, 1.4)
+
+              #garante que a variavel para manter o loop principal e True
+              grupo_localizado = True
+          else:
+              print("✅ Grupo e crédito selecionados com sucesso. Saindo do loop de grupos.")
+              #Alterando booleano para assegurar que o loop principal nao vai rodar
+              grupo_localizado = False
+              break  # Sai do loop de grupos se um grupo válido foi encontrado      
+
         
-                    elemento_clicavel = colunas[0].find_element(By.TAG_NAME, 'u')
-                    action.move_to_element(elemento_clicavel).pause(random.uniform(0.2, 0.7)).click().perform()
-                    
-                    print(f"Elemento do código {codigo_bem_selecionado} clicado com sucesso.")
-                    human_sleep(2, 2.5)
-                    
-                    # Retirar Seguro (*Talvez mover para função separada ou trocar por um Loop de tentativas)
+      # fim loop de grupos
 
-                    #Retira somente de CPF
-                    #verificar se o tipo de documento do cliente é CPF antes de iniciar o loop
-                    if str(cliente_atual.get('tipo_cliente') or '').strip().upper() == 'CPF':
-                        #RETIRAR SEGURO - LOOP DE VERIFICAÇÃO
-                        try:
-                            botao_seguro = wait.until(EC.element_to_be_clickable((By.XPATH, '//input[@formcontrolname="checkSeguro"]')))
-                            estado_atual = botao_seguro.get_attribute('aria-pressed')
-                            print(f"🔍 Estado atual do seguro antes do loop de verificação: {estado_atual}")
-                                
-                            # loop para garantir que botao foi clicado e estado alterado
-                            tentativas = 0
-                            max_tentativas = 15
+      ### >>> Pular Pagina >>>
 
-                            for tentativa in range(max_tentativas):
-                                estado_atual = botao_seguro.get_attribute('aria-pressed')
-                                print(f"🔍 Verificação {tentativa + 1}/{max_tentativas}: Estado atual do seguro: {estado_atual}")
+      print("Nao encontrado na pagina indo para a proxima")
 
-                                if estado_atual == 'false':
-                                    print("✅ O seguro está DESATIVADO. Prosseguindo com o processamento dos clientes...")
-                                    break
-                                else:
-                                    print("⚠️ O seguro ainda está ATIVADO. Tentando desativar novamente...")
-                                    # clicar no elemento atual
-                                    action.move_to_element(botao_seguro).pause(random.uniform(0.01, 0.08)).click(botao_seguro).perform()
-                                    human_sleep(0.5, 1.0) # Dá um tempo para a página processar o clique
-
-                                    # tentar re-obter o elemento (em caso de re-render)
-                                    try:
-                                        botao_seguro = driver.find_element(By.XPATH, '//input[@formcontrolname="checkSeguro"]')
-                                    except Exception:
-                                        try:
-                                            botao_seguro = WebDriverWait(driver, 5).until(
-                                                EC.presence_of_element_located((By.XPATH, '//input[@formcontrolname="checkSeguro"]'))
-                                            )
-                                        except Exception:
-                                            print("❌ Não foi possível localizar o botão de seguro após o clique.")
-                                            break
-
-                                    # última tentativa: reportar falha se ainda estiver ativo
-                                    if tentativa == max_tentativas - 1:
-                                        estado_atual = botao_seguro.get_attribute('aria-pressed')
-                                        if estado_atual != 'false':
-                                            print("❌ Falha: O estado do seguro ainda não é 'false' após várias tentativas. Necessário revisão manual.")
-                        except TimeoutException:
-                            print("❌ Erro: Tempo esgotado. O botão de seguro não foi encontrado ou não se tornou clicável em 10 segundos.")
-                        except Exception as e:
-                            print(f"❌ Ocorreu um erro inesperado ao interagir com o botão de seguro: {e}")
-                    else:
-                        human_sleep(1, 1.5)
-    
-
-                    ### >>> Clicar em CONTRATAR COTA
-                    WebDriverWait(driver, 10).until(
-                                                    EC.presence_of_element_located((By.XPATH, '//span[contains(text(), " contratar cota ")]'))
-                                                  )
-                    botao_contratar_cota = driver.find_element(By.XPATH, '//span[contains(text(), " contratar cota ")]')
-                    action.move_to_element(botao_contratar_cota).pause(random.uniform(0.3, 0.7)).click(botao_contratar_cota).perform()
-                    human_sleep(1.5, 2)
-                    print("Clicado em CONTRATAR COTA, aguardando próxima tela...")
-
-
-                    #===================================================
-                    #===================================================
-                    #===================================================
-                    # Chamar a função para preencher os dados pessoais
-                    #... continuar código Preencher os dados do cliente na próxima tela
-                    
-                    if str(cliente_atual.get('tipo_cliente') or '').strip().upper() == 'CPF':
-                      sucesso_preenchimento = preencher_dados_pessoais()
-
-                    else:
-    
-                      sucesso_preenchimento = preencher_dados_PJ()
-
-                    #Checar se o preenchimento foi bem sucedido e atualizar o status no CSV
-                    if sucesso_preenchimento:
-                        print("✅ Dados pessoais preenchidos com sucesso.")
-                        atualizar_status_cliente(cpf_atual, "Finalizado")
-                    else:
-                        
-                        print("❌ Falha ao preencher os dados pessoais.")
-                        atualizar_status_cliente(cpf_atual, "Erro")
+      # próxima página? - double check se existe ou se desativado
+      try:
+          botao_proxima_pagina = driver.find_element(By.XPATH, '//button[@id="nextPageId"]')
+          botao_prox_pagina_existe = True
+      except Exception as e:
+          print("Não foi possível ir para a próxima página:")
+          human_sleep(1.5, 2.5)
+          botao_prox_pagina_existe = False
 
 
 
-                    #===================================================
-                    #===================================================
-                    #===================================================
-
-                    break
-                
-            # Fim do loop de busca por grupos
-        else:
-            print(f"❌ Nenhuma linha de crédito foi encontrada com parcela menor ou igual a R$ {valor_maximo_float}.")
+      if botao_prox_pagina_existe:
         
+          if botao_proxima_pagina.get_attribute("disabled"):
+              print("Botao desativaado - Voltando para Pg1")
+              #Voltar para a Pagina (ir para a pagina)
+              ir_para_pg = driver.find_element(By.CSS_SELECTOR, 'input[aria-label="ir para a página"]')
+              action.move_to_element(ir_para_pg)\
+                          .pause(random.uniform(0.2, 0.3))\
+                          .click(ir_para_pg)\
+                          .pause(random.uniform(0.1, 0.3))\
+                          .send_keys(Keys.CONTROL + 'a')\
+                          .send_keys(Keys.DELETE)\
+                          .send_keys('1')\
+                          .perform()
+              action.move_to_element(ir_para_pg).send_keys(Keys.ENTER).perform()
+              #Verificar se botao Filtrar esta ativo:
+              # Filtrar 
 
-        # Se grupo Não encontrado, clicar em voltar e tentar o próximo grupo
-        if not grupo_encontrado:
-            print(f"⚠️ Nenhuma opção válida encontrada no grupo {numero_grupo}. Voltando para a lista de grupos...")
-            botao_voltar = driver.find_element(By.XPATH, '//p[contains(text(), " voltar para grupos")]')
-            action.move_to_element(botao_voltar).pause(random.uniform(0.2, 0.7)).click(botao_voltar).perform()
-            human_sleep(0.8, 1.4)
+              human_sleep(1, 1.5)
+              print("verificando botão Filtrar - inicar tudo novamente")
+              btn_filtrar = driver.find_element(By.ID, 'btnFiltrar')
 
-        else:
-            print("✅ Grupo e crédito selecionados com sucesso. Saindo do loop de grupos.")
-            break  # Sai do loop de grupos se um grupo válido foi encontrado      
+              if btn_filtrar.is_enabled():
+                  print("Botão 'Filtrar' está ATIVO. Clicando e voltando para o loop")
+                  action.move_to_element(btn_filtrar).pause(random.uniform(0.1, 0.2)).click(btn_filtrar).perform()
+                  human_sleep(5, 6)
+                  
+              else:
+                  print("Botão 'Filtrar' está INATIVO (desabilitado).")
+                  #status_var.set("reCAPTCHA")
+                  ui_alert("reCAPTCHA", "Resolva o reCAPTCHA e clique em Buscar Consorcio!", "info")
+
+                  #toast("reCAPTCHA", "Resolva o reCAPATCHA e clique em Buscar Consorcio Novamente", "reCAPTCHA", timeout=6000)
+                  break 
+
+          else:
+              #ATIVO SEGUINDO para PROXIMA PAGINA
+              action.move_to_element(botao_proxima_pagina).pause(random.uniform(0.1, 0.2)).click(botao_proxima_pagina).perform()
+              human_sleep(1, 1.5)
+              print("Indo para a próxima página...")
 
 
+      else:
+          print("Botao nao existe - Voltando pagina 1 ")
+          #Voltar para a Pagina (ir para a pagina)
+          ir_para_pg = driver.find_element(By.CSS_SELECTOR, 'input[aria-label="ir para a página"]')
+          action.move_to_element(ir_para_pg)\
+                      .pause(random.uniform(0.2, 0.3))\
+                      .click(ir_para_pg)\
+                      .pause(random.uniform(0.1, 0.3))\
+                      .send_keys(Keys.CONTROL + 'a')\
+                      .send_keys(Keys.DELETE)\
+                      .send_keys('1')\
+                      .perform()
+          action.move_to_element(ir_para_pg).send_keys(Keys.ENTER).perform()
+          
+          #Verificar se botao Filtrar esta ativo:
+          # Filtrar 
 
+          human_sleep(1, 1.5)
+          print("verificando botão Filtrar - inicar tudo novamente")
+          btn_filtrar = driver.find_element(By.ID, 'btnFiltrar')
 
-
-
-
-    # fim loop de grupos
-
+          if btn_filtrar.is_enabled():
+              print("Botão 'Filtrar' está ATIVO. Clicando e voltando para o loop")
+              action.move_to_element(btn_filtrar).pause(random.uniform(0.2, 0.5)).click(btn_filtrar).perform()
+              human_sleep(4.5, 5.5)
+              
+          else:
+              print("Botão 'Filtrar' está INATIVO (desabilitado).")
+              #status_var.set("Erro")
+              #toast("reCAPTCHA", "Resolva o reCAPATCHA e clique em Buscar Consorcio Novamente", "reCAPTCHA", timeout=6000)
+              ui_alert("reCAPTCHA", "Resolva o reCAPTCHA e clique em Buscar Consorcio!", "info")
+              break         
 
 
 
@@ -1669,151 +1961,190 @@ def preencher_profissao_js(profissao_texto: str, timeout=10):
 
 
 #3.3 - CPF e CNPJ
-def preencher_pagamento_boleto_js(cliente_series, timeout=8):
+
+def preencher_pagamento_boleto_js (timeout=30, max_attempts=3):
     global driver
     
+    # 1. Pré-verificações (mantidas por segurança)
     if not ensure_driver_alive(driver):
         raise RuntimeError("WebDriver inválido. Recrie o driver.")
     
-    time.sleep(0.2)
-
-    banco_atual          = str(cliente_series.get('banco') or '').strip()
-    agencia_atual        = str(cliente_series.get('agencia') or '').strip()
-    conta_corrente_atual = str(cliente_series.get('conta_corrente') or '').strip()
-    digito_conta_atual   = str(cliente_series.get('digito_conta') or '').strip()
-
     WebDriverWait(driver, timeout).until(
         EC.presence_of_element_located((By.CSS_SELECTOR, "mf-iparceiros-contratacao"))
     )
-
+    time.sleep(0.2)
     js = r"""
-      return (function run(data){
+      return (function run(){
         try{
-          // === guards ===
+          // === Configurações e Guards ===
           const host = document.querySelector('mf-iparceiros-contratacao');
           if(!host) return { ok:false, step:'no-host' };
           const root = host.shadowRoot;
           if(!root) return { ok:false, step:'no-shadow' };
 
-          // === selecionar BOLETO (tenta BB e BO) ===
-          function clickRadio(val){
-            const inp = root.querySelector(`input[formcontrolname="forma_pagamento"][value="${val}"]`);
-            if(!inp) return false;
-            try { inp.scrollIntoView({block:'center'}); } catch(e){}
-            if(!inp.checked){
-              try{
-                inp.click();
+          // === Função de Clique em Radio Button (CORRIGIDA) ===
+          function clickRadio(selector, expectedValue){
+            
+            // --- BLOCO RESTAURADO: Localiza o INPUT ---
+            let inp = null;
+            if (expectedValue) {
+              // Localiza por formcontrolname="forma_pagamento" e valor (usado para Boleto)
+              inp = root.querySelector(`input[formcontrolname="forma_pagamento"][value="${expectedValue}"]`);
+            } else if (selector) {
+              // Localiza por seletor (usado para No Resgate)
+              inp = root.querySelector(selector);
+            }
+            // ------------------------------------------
+
+            if(!inp) return { checked: false, value: expectedValue || selector, step: 'not-found' };
+            
+            // Se já estiver checado, retorna sucesso imediatamente
+            if (inp.checked) return { checked: true, value: expectedValue || selector, step: 'already-checked' };
+
+            // --- BLOCO DE CLIQUE MELHORADO: Tenta o Label, senão o Input ---
+            const labelId = inp.id;
+            let targetElement = inp; // O default é o input (fallback)
+
+            if (labelId) {
+                // Procura o label que está FOR esse input no Shadow Root
+                const associatedLabel = root.querySelector(`label[for="${labelId}"]`);
+                // Se encontrou o label, clica no label (mais stealth/robusto)
+                if (associatedLabel) {
+                    targetElement = associatedLabel;
+                }
+            }
+            // -----------------------------------------------------------------
+
+            // Tenta clicar no elemento alvo (pode ser o input ou o label)
+            try { targetElement.scrollIntoView({block:'center'}); } catch(e){}
+            try{
+                targetElement.click(); // CLICA no elemento mais externo/visível
+                // Dispara eventos no INPUT de rádio (o elemento 'inp'), independentemente de onde clicamos
                 inp.dispatchEvent(new Event('input',{bubbles:true}));
                 inp.dispatchEvent(new Event('change',{bubbles:true}));
-              }catch(e){}
+            }catch(e){
+                return { checked: false, value: expectedValue || selector, step: 'click-failed' };
             }
-            return !!inp.checked;
+            
+            // Retorna o status final de checked
+            return { checked: !!inp.checked, value: expectedValue || selector, step: 'clicked' };
           }
-          let boleto = clickRadio('BB') || clickRadio('BO');
-          if(!boleto) return { ok:false, step:'boleto-not-found' };
+          // === FIM da Função de Clique em Radio Button ===
 
-          // pequena espera para UI reagir
-          // (sincrono: só da uma chance a máscara/DOM)
-          // o Python ainda pode aguardar fora com time.sleep(0.2) se quiser
-          // mas aqui seguimos direto
 
-          // === checar campos dependentes ===
-          function fields(){
-            const banco  = root.querySelector('input[formcontrolname="nome_banco_encerramento"], input[formcontrolname="nome_banco"]');
-            const ag     = root.querySelector('input[formcontrolname="agencia_encerramento"], input[formcontrolname="agencia"]');
-            const conta  = root.querySelector('input[formcontrolname="conta_encerramento"], input[formcontrolname="conta"]');
-            const digito = root.querySelector('input[formcontrolname="digito_encerramento"], input[formcontrolname="digito"]');
-            return { banco, ag, conta, digito };
-          }
-          let { banco, ag, conta, digito } = fields();
-          if(!(banco && ag && conta && digito)){
-            return { ok:false, step:'fields-missing' };
+          // 1. Selecionar BOLETO (tenta BB e depois BO)
+          let resBoleto = clickRadio(null, 'BB');
+          if (!resBoleto.checked) {
+            resBoleto = clickRadio(null, 'BO');
           }
 
-          // === helpers ===
-          function nativeSetValue(el, value){
-            if(!el) return;
-            const proto =
-              el instanceof HTMLInputElement ? HTMLInputElement.prototype :
-              el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype :
-              el.__proto__;
-            const desc = proto && Object.getOwnPropertyDescriptor(proto, "value");
-            if (desc && desc.set) desc.set.call(el, value); else el.value = value;
-            el.dispatchEvent(new Event("input", {bubbles:true}));
-            el.dispatchEvent(new Event("change", {bubbles:true}));
-          }
+          // 2. Selecionar 'no resgate'
+          
+          let resResgate;
+          // Localiza o H5 que contém o texto (mais robusto que querySelector aninhado)
+          const h5Resgate = Array.from(root.querySelectorAll('h5')).find(el => el.textContent.trim() === 'no resgate');
 
-          // Banco + tentativa de sugerir 1ª opção
-          (function fillBanco(){
-            if(!banco) return;
-            try { banco.scrollIntoView({block:'center'}); } catch(e){}
-            nativeSetValue(banco, "");
-            nativeSetValue(banco, (data.banco||""));
+          if (h5Resgate) {
+              // 1. Encontra o elemento <label> pai do <h5>
+              const label = h5Resgate.closest('label');
+              if (label && label.htmlFor) {
+                  // 2. Localiza o INPUT usando o atributo 'for' do label
+                  const resgateInputSelector = `input#${label.htmlFor}`;
+                  resResgate = clickRadio(resgateInputSelector, null);
+              }
+          }
+          // Se falhou ou não encontrou pelo texto, cai no fallback (menos específico)
+          if (!resResgate) {
+              resResgate = clickRadio('input[formcontrolname="dados_encerramento"]', null); 
+          }
+          
+
+          // === Seleção dos Checkboxes
+          function check(formControlName){
+            const el = root.querySelector(`input[formcontrolname="${formControlName}"]`);
+            if (!el) return { checked: false, name: formControlName, step: 'not-found' };
+
+            // Se já estiver checado, ignora
+            if (el.checked) return { checked: true, name: formControlName, step: 'already-checked' };
+
             try{
-              const c = banco.closest("ids-input, ids-fieldset, ids-combobox") || banco;
-              const r = c && c.shadowRoot ? c.shadowRoot : c;
-              const t = r && (r.querySelector('div[role="combobox"]')
-                          || r.querySelector('button[aria-haspopup="listbox"]')
-                          || r.querySelector('.ids-trigger')
-                          || r.querySelector('.ids-select__trigger'));
-              if (t) t.click();
-            }catch(e){}
-            setTimeout(()=>{
-              try{
-                const doc = Array.from(document.querySelectorAll('ids-option, .ids-option, span.ids-option__text'));
-                const loc = Array.from((root||document).querySelectorAll('ids-option, .ids-option, span.ids-option__text'));
-                const all = doc.concat(loc).filter(o => o && (o.offsetParent !== null));
-                if (all.length){
-                  const first = all[0].closest && all[0].closest('ids-option') ? all[0].closest('ids-option') : all[0];
-                  first && first.click();
-                  banco.dispatchEvent(new Event("input",{bubbles:true}));
-                  banco.dispatchEvent(new Event("change",{bubbles:true}));
-                }
-              }catch(e){}
-            }, 30);
-          })();
+                // Tenta encontrar o label (melhor para cliques)
+                const label = root.querySelector(`label[for="${el.id}"]`);
+                const target = label || el;
 
-          // Agência, Conta, Dígito
-          nativeSetValue(ag,     (data.agencia||""));
-          nativeSetValue(conta,  (data.conta||""));
-          nativeSetValue(digito, (data.digito||""));
+                // Clica no elemento (label ou input)
+                target.click(); 
 
-          // Checkboxes de ciência
-          function check(sel){
-            const el = root.querySelector(sel);
-            if (!el) return;
-            if (!el.checked){
-              try{
-                el.click();
+                // Dispara eventos no INPUT para garantir que o framework reaja
                 el.dispatchEvent(new Event('input',{bubbles:true}));
                 el.dispatchEvent(new Event('change',{bubbles:true}));
-              }catch(e){}
+                
+                return { checked: !!el.checked, name: formControlName, step: 'clicked' };
+            }catch(e){
+                return { checked: false, name: formControlName, step: 'click-failed', message: String(e) };
             }
           }
-          check('input[formcontrolname="cienciaGarantiaPrazo"]');
-          check('input[formcontrolname="cienciaRegrasCancelamento"]');
-          check('input[formcontrolname="cienciaRegrasCRP"]');
 
-          return { ok:true, step:'boleto-preenchido' };
+          // Execução sequencial
+          let resGarantiaPrazo      = check('cienciaGarantiaPrazo');
+          let resRegrasCancelamento = check('cienciaRegrasCancelamento');
+          let resRegrasCRP          = check('cienciaRegrasCRP');
+
+          // Verificação de sucesso para os checkboxes
+          let checkboxesOk = resGarantiaPrazo.checked && resRegrasCancelamento.checked && resRegrasCRP.checked;
+
+         
+
+
+
+          return { 
+              ok: resBoleto.checked && (resResgate && resResgate.checked), // Certifica que resResgate não é undefined
+              status: { 
+                  boleto: resBoleto, 
+                  resgate: resResgate 
+              }
+          };
+          
         }catch(e){
+          // Retorna a exceção se ocorrer algum erro grave no script
           return { ok:false, step:'exception', message: String(e && e.message || e) };
         }
-      })(arguments[0]);
+      })()
     """
 
-    try:
-        res = driver.execute_script(js, {
-            "banco": banco_atual,
-            "agencia": agencia_atual,
-            "conta": conta_corrente_atual,
-            "digito": digito_conta_atual
-        })
-    except Exception as e:
-        print("JavascriptException em preencher_pagamento_boleto_js:", e)
-        return {"ok": False, "step": "js-exception", "message": str(e)}
+    attempt = 0
+    # O timeout do loop será baseado no número de tentativas, não no time total
+    while attempt < max_attempts:
+        attempt += 1
+        print(f"Tentativa {attempt}/{max_attempts} de selecionar 'Boleto' e 'No Resgate' via JS...")
+        
+        try:
+            # Executa o JavaScript
+            res = driver.execute_script(js)
+            
+            # 2. Verifica o resultado da execução do JS
+            if res.get('ok') is True:
+                print("✅ Ambos 'Boleto' e 'No Resgate' selecionados com sucesso na tentativa:", attempt)
+                return {"ok": True, "step": "success", "attempts": attempt}
+            
+            # Se não deu OK, imprime o status detalhado (para debug)
+            status_boleto = res.get('status', {}).get('boleto', {})
+            status_resgate = res.get('status', {}).get('resgate', {})
+            
+            print(f"   Status Boleto: {'CHECKED' if status_boleto.get('checked') else 'FAILED'} (Step: {status_boleto.get('step')})")
+            print(f"   Status Resgate: {'CHECKED' if status_resgate.get('checked') else 'FAILED'} (Step: {status_resgate.get('step')})")
+            
+            # 3. Pausa mais humana/aleatória para nova tentativa
+            # Se falhou, esperamos um pouco mais antes de tentar de novo, simulando um humano
+            time.sleep(random.uniform(1.0, 2.5))
+            
+        except Exception as e:
+            print(f"⚠️ JavascriptException na tentativa {attempt}:", e)
+            time.sleep(random.uniform(1.5, 3.0)) # Pausa maior em caso de erro grave
 
-    print("Resultado preencher_pagamento_boleto_fast:", repr(res))
-    return res
+    # Se o loop terminar sem sucesso
+    print(f"❌ Falha ao selecionar 'Boleto' e 'No Resgate' após {max_attempts} tentativas.")
+    return {"ok": False, "step": "max-attempts-reached", "attempts": max_attempts, "final_result": res}
 
 
 
@@ -2195,7 +2526,7 @@ def preencher_dados_PJ ():
 
 
     
-    time.sleep(0.1)
+    time.sleep(0.2)
 
     #========================================================================================================
 
@@ -2221,14 +2552,14 @@ def preencher_dados_PJ ():
         if botao_continuar_check and botao_continuar_check.is_displayed():
             print("O botão 'Continuar' ainda está presente. Tentando clicar novamente...")
             time.sleep(1)
-            action.move_to_element(btn_continuar).pause(random.uniform(0.02, 0.2)).click(btn_continuar).perform()
+            action.move_to_element(btn_continuar).pause(random.uniform(0.05, 0.2)).click(btn_continuar).perform()
             human_sleep()
             print("Clicado em 'Continuar' novamente, aguardando próxima tela...")
     except Exception as e:
         
         pass  # Se der erro, ignora e continua
     
-    time.sleep(1)
+    time.sleep(1.1)
 
 
 
@@ -2238,7 +2569,7 @@ def preencher_dados_PJ ():
 
 
     print("Preenchendo dados de pagamento via boleto...")
-
+    time.sleep(0.1)
     res3 = preencher_pagamento_boleto_js(cliente_atual)
     print("Resultado do preenchimento do pagamento via boleto:", repr(res3))
     if not (isinstance(res3, dict) and res3.get("ok") is True):
@@ -2425,20 +2756,27 @@ def _start_driver_bg():
     try:
         root.after(0, lambda: btn_iniciar_driver.configure(state="disabled"))
         iniciar_driver()  # cria o driver
-        root.after(0, lambda: messagebox.showinfo("OK", "Driver iniciado!"))
+        #root.after(0, lambda: messagebox.showinfo("OK", "Driver iniciado!"))
+        ui_alert("OK", "Driver iniciado!", "info")
         _driver_keepalive_evt.wait()
     except Exception as e:
         msg = f"{e.__class__.__name__}: {e}"
         root.after(0, lambda: btn_iniciar_driver.configure(state="normal"))
-        root.after(0, lambda m=msg: messagebox.showerror("Erro", m)) 
+        #root.after(0, lambda m=msg: ui_alert("Erro", m, "error"))
+        root.after(0, lambda m=msg: show_modal("Erro", m, "error"))
+
+
 
 
 def start_driver_thread():
-    global driver_thread, _driver_keepalive_evt
-    _driver_keepalive_evt.clear()
-    # driver_thread = threading.Thread(target=_start_driver_bg, daemon=True)
-    # driver_thread.start()
-    threading.Thread(target=_start_driver_bg, daemon=True).start()
+    btn_iniciar_driver.configure(state="disabled", text="Iniciando...")
+    t = threading.Thread(target=_thread_driver, daemon=True)
+    t.start()
+
+
+
+
+
 
 
 
@@ -2455,8 +2793,8 @@ def start_driver_thread():
 # ==================== Cores personalizadas ====================
 cor_fundo_janela   = "#040312"
 cor_fundo_frame    = "#0C1B39"
-cor_botao_fundo    = "#4691BF"
-cor_botao_hover    = "#5988D9"
+cor_botao_fundo    = "#3E8BBB"
+cor_botao_hover    = "#4E7ED2"
 cor_botao_texto    = "white"
 cor_texto_label    = "white"
 cor_fundo_entry    = "#12121B"
@@ -2475,139 +2813,102 @@ def _ensure_single_instance(port=49666):
     s.listen(1)
     return s  # manter a referência viva
 
-
+def _thread_driver():
+    global driver_started
+    try:
+        iniciar_driver()
+        ui_alert("OK", "Driver iniciado!", "info")
+        root.after(0, lambda: btn_inserir.configure(state="normal"))
+        root.after(0, lambda: btn_buscar.configure(state="normal"))
+        root.after(0, lambda: btn_iniciar_driver.configure(text="Driver iniciado"))
+    except Exception as e:
+        ui_alert("Erro", f"Falha ao iniciar driver:\n{e}", "error")
+        root.after(0, lambda: btn_iniciar_driver.configure(
+            state="normal", text="Iniciar Navegador"
+        ))
 
 def main():
-    global btn_iniciar_driver, root
-    
+    global root
+
+    # 1) trava de instância única — ANTES de criar janela/threads
     guard = _ensure_single_instance()
     if guard is None:
-        return  # já existe outra janela aberta
-    
-    # ... resto do seu Tk ...
-    if tk._default_root is not None:
-        return
-    
-    # ==================== Janela principal ====================
+        sys.exit(0)
+
+    # 2) cria a janela
     root = tk.Tk()
     root.title("Automação Seleção de Consórcio")
     root.configure(bg=cor_fundo_janela)
-    root.minsize(width=430, height=480)
-    root.columnconfigure(0, weight=1)
-    
+    root.minsize(width=400, height=300)
     root.protocol("WM_DELETE_WINDOW", on_close)
 
-    # ==================== Tema ttk ====================
-    style = ttk.Style()
-    style.theme_use("clam")  # Força o tema compatível com macOS
-
-    style.configure(
-        "Custom.TButton",
-        background=cor_botao_fundo,
-        foreground=cor_botao_texto,
-        font=("Helvetica", 12, "bold"),
-        borderwidth=0,
-        focusthickness=3,
-        focuscolor=cor_fundo_frame,
-        padding=6,
-        )
-    style.map(
-        "Custom.TButton",
-        background=[("active", cor_botao_hover)],
-        foreground=[("active", cor_botao_texto)]
-        )
-
-    # ==================== Título ====================
-    titulo_label = tk.Label(
-        root, 
-        text="Simular e Contratar Consórcio",
-        font=("Helvetica", 14, "bold"),
-        bg=cor_fundo_janela,
-        fg=cor_botao_texto
-        )
-    titulo_label.pack(pady=(10, 10))
+    # 3) monta toda a UI aqui
+    build_ui(root)
 
 
-
-
-    # =================== Frame: Iniciar Driver ===================
-    cred_frame = tk.LabelFrame(root, text="Abrir Chrome", bg=cor_fundo_frame, fg=cor_texto_label, padx=10, pady=4)
-    cred_frame.pack(padx=15, pady=5, fill="x")
-    cred_frame.columnconfigure(1, weight=1)
-
-    btn_iniciar_driver = ttk.Button(cred_frame, text="Abrir Navegador", style="Custom.TButton")
-    btn_iniciar_driver.configure(command=start_driver_thread)
-    btn_iniciar_driver.grid(row=0, column=0, columnspan=2, sticky="ew", padx=5, pady=(7, 4))
-
-
-
-
-
-    # # =================== Frame: Buscar e guardar Grupos (Antigos) ===================
-    # cred_frame = tk.LabelFrame(root, text="Guardar os códigos de Grupos para desconsiderar", bg=cor_fundo_frame, fg=cor_texto_label, padx=10, pady=4)
-    # cred_frame.pack(padx=15, pady=5, fill="x")
-    # cred_frame.columnconfigure(1, weight=1)
-
-    # btn_salvar_grupos = ttk.Button(
-    #     cred_frame, text="Salvar os códigos de Grupos", style="Custom.TButton",
-    #     command=guardar_grupos_disponiveis
-    #                     )
-    # btn_salvar_grupos.grid(row=0, column=0, columnspan=2, sticky="ew", padx=5, pady=(7, 4))
-
-
-
-
-
-
-
-
-    # =================== Frame: Inserir Cliente ===================
-    fila_frame = tk.LabelFrame(root, text="Inserir CPF/Data Nasc e Tipo Cons. do Cliente", bg=cor_fundo_frame, fg=cor_texto_label, padx=10, pady=2)
-    fila_frame.pack(padx=15, pady=2, fill="x")
-    fila_frame.columnconfigure(1, weight=1)
-
-    botao_buscar = ttk.Button(
-    fila_frame, text="Inserir dados Cliente", style="Custom.TButton",
-    command=inserir_dados_cliente_js 
-                )
-    botao_buscar.grid(row=0, column=0, columnspan=2, pady=3, padx=5, sticky="ew")
-
-    fila_status_label = tk.Label(fila_frame, text="...", font=("TkDefaultFont", 9, "italic"),
-                            bg=cor_fundo_frame, fg=cor_texto_label)
-    fila_status_label.grid(row=1, column=0, columnspan=2, pady=2)
-
-
-
-
-
-    # =================== Frame: Função Principal ===================
-    busar_Consorcio_frame = tk.LabelFrame(root, text="Principal: Busca Brugo > Credito e Preenche dados cliente", bg=cor_fundo_frame, fg=cor_texto_label, padx=10, pady=2)
-    busar_Consorcio_frame.pack(padx=15, pady=5, fill="x")
-
-    btn_buscar_grupo = ttk.Button(
-    busar_Consorcio_frame, text="Buscar Consórcio", style="Custom.TButton",
-    command=buscar_consorcio_cliente 
-                )
-    btn_buscar_grupo.pack(pady=5, padx=5, fill="x")
-
-    bsc_consc_status_label = tk.Label(busar_Consorcio_frame, text="...", font=("TkDefaultFont", 9, "italic"),
-                            bg=cor_fundo_frame, fg=cor_texto_label)
-    bsc_consc_status_label.pack(pady=5)
-
-
-
-
-    # =================== Inicia GUI ===================
+    # 4 loop de mensagens
     root.mainloop()
 
-    # =================== Encerramento ===================
-    # try:
-    #     if driver:
-    #         driver.quit()
-    # except NameError:
-    #     pass
+def build_ui(root):
+    global btn_iniciar_driver, btn_inserir, btn_buscar
+
+    # --- estilos ---
+    style = ttk.Style()
+    style.theme_use("clam")
+    style.configure("Custom.TButton",
+                    background=cor_botao_fundo, foreground=cor_botao_texto,
+                    font=("Helvetica", 12, "bold"), borderwidth=0, padding=6)
+    style.map("Custom.TButton",
+              background=[("active", cor_botao_hover)],
+              foreground=[("active", cor_botao_texto)])
+
+    # --- título ---
+    tk.Label(root, text="Simular e Contratar Consórcio",
+             font=("Helvetica", 15, "bold"),
+             bg=cor_fundo_janela, fg=cor_botao_texto).pack(pady=(30, 20))
+
+    # === ÚNICO CONJUNTO DE BOTÕES (na ordem desejada) ===
+    btn_iniciar_driver = ttk.Button(
+        root, text="0 - Iniciar Navegador", style="Custom.TButton",
+        command=start_driver_thread
+    )
+    btn_iniciar_driver.pack(padx=15, pady=8, fill="x")
+
+    btn_inserir = ttk.Button(
+        root, text="1 - Inserir dados Cliente", style="Custom.TButton",
+        command=inserir_dados_cliente_js, state="disabled"
+    )
+    btn_inserir.pack(padx=15, pady=8, fill="x")
+
+    btn_buscar = ttk.Button(
+        root, text="2 - Buscar Consórcio", style="Custom.TButton",
+        command=buscar_consorcio_cliente, state="disabled"
+    )
+    btn_buscar.pack(padx=15, pady=8, fill="x")
+
+    # # === Seções apenas informativas (sem botões) ===
+    # sec1 = tk.LabelFrame(root, text="Inserir CPF/CNPJ; Dt Nasc e Tp Prod. Cliente",
+    #                      bg=cor_fundo_frame, fg=cor_texto_label, padx=10, pady=6)
+    # sec1.pack(padx=15, pady=6, fill="x")
+    # tk.Label(sec1, text="...", font=("TkDefaultFont", 9, "italic"),
+    #          bg=cor_fundo_frame, fg=cor_texto_label).pack(anchor="w")
+
+    # sec2 = tk.LabelFrame(root, text="Principal: Busca Grupo > Crédito > Preenche dados",
+    #                      bg=cor_fundo_frame, fg=cor_texto_label, padx=10, pady=6)
+    # sec2.pack(padx=15, pady=6, fill="x")
+    # tk.Label(sec2, text="...", font=("TkDefaultFont", 9, "italic"),
+    #          bg=cor_fundo_frame, fg=cor_texto_label).pack(anchor="w")
+
+    # traz à frente
+    root.after(0, root.lift)
+    root.after(0, lambda: root.attributes('-topmost', True))
+    root.after(100, lambda: root.attributes('-topmost', False))
+
+
+
 
 if __name__ == "__main__":
     main()
+    
     
 #---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
