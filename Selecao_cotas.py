@@ -1,6 +1,20 @@
+#app.py 
+
 # Módulos da Biblioteca Padrão do Python
 import os                   # Interage com o sistema operacional (manipulação de arquivos, variáveis de ambiente).
 import sys                  # Fornece acesso a variáveis e funções específicas do interpretador (ex.: argumentos de linha de comando).
+
+import multiprocessing
+
+try:
+    multiprocessing.set_start_method('spawn', force=True)
+    print("Modo 'spawn' do multiprocessing ativado.")
+except (RuntimeError, ValueError) as e:
+
+    print(f"Aviso ao configurar 'spawn' (ignorar se for processo-filho): {e}")
+
+
+
 import time                 # Funções relacionadas ao tempo (pausas, medição de tempo de execução).
 import csv                  # Implementa classes para ler e escrever dados tabulares no formato CSV.
 import json                 # Codifica e decodifica dados no formato JSON.
@@ -299,20 +313,6 @@ def _shutdown():
 if not getattr(sys, "frozen", False):  # só em modo dev
     atexit.register(_shutdown)
 
-# def on_close():
-#     try:
-#         _driver_keepalive_evt.set()   # libera o thread
-#     except: pass
-    
-#     try:
-#         if driver: driver.quit()
-#     except: pass
-    
-#     #root.destroy()
-
-#     try:
-#       root.quit()   # sai do loop
-#     except: pass
 
 def on_close():
     try:
@@ -718,6 +718,12 @@ def iniciar_driver():
   options.add_argument("--disable-background-networking")
   options.add_argument("--disable-extensions")
   options.add_argument("--disable-sync")
+
+  ### > verificar se NAO atraplaha a invisibilidade
+  options.add_argument("--disable-cache")
+  options.add_argument("--disk-cache-size=0")
+  options.add_argument("--media-cache-size=0")
+  options.add_argument("--disable-application-cache")
 
   # Caminho explícito do Chrome (macOS)
   options.binary_location = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -1315,7 +1321,7 @@ def buscar_consorcio_cliente():
                       #Retira somente de CPF
                       #verificar se o tipo de documento do cliente é CPF antes de iniciar o loop
                       if str(cliente_atual.get('tipo_cliente') or '').strip().upper() == 'CPF':
-                          #RETIRAR SEGURO - LOOP DE VERIFICAÇÃO
+                          # - LOOP DE VERIFICAÇÃO
                           try:
                               botao_seguro = wait.until(EC.element_to_be_clickable((By.XPATH, '//input[@formcontrolname="checkSeguro"]')))
                               estado_atual = botao_seguro.get_attribute('aria-pressed')
@@ -1428,6 +1434,9 @@ def buscar_consorcio_cliente():
 
               #garante que a variavel para manter o loop principal e True
               grupo_localizado = True
+              print("Recarregando a lista de grupos após voltar...")
+              break 
+
           else:
               print("✅ Grupo e crédito selecionados com sucesso. Saindo do loop de grupos.")
               #Alterando booleano para assegurar que o loop principal nao vai rodar
@@ -2908,6 +2917,7 @@ def build_ui(root):
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()
     
     
